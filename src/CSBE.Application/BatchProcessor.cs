@@ -1,32 +1,76 @@
-﻿using System.Collections.Concurrent;
+﻿using System;
+using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace CSBE.Application
 {
-    internal sealed class BatchProcessor
+    internal sealed class BatchProcessor<T>
     {
-        private readonly BlockingCollection<Task> _taskQueue;
+        private readonly BlockingCollection<T> _queue;
         private readonly CancellationTokenSource _cancellationTokenSource;
+
+        public bool CanHandleMoreItems { get => !_cancellationTokenSource.IsCancellationRequested && !_queue.IsAddingCompleted; }
 
         public BatchProcessor(int batchSize)
         {
-            _taskQueue = new BlockingCollection<Task>(batchSize);
+            _queue = new BlockingCollection<T>(batchSize);
             _cancellationTokenSource = new CancellationTokenSource();
         }
 
-        public void Start() => Task.Run(() => ProcessTasksAsync(_cancellationTokenSource.Token));
-
-        public void Stop() => _cancellationTokenSource.Cancel();
-
-        public void EnqueuTask(Task task) => _taskQueue.Add(task);
-
-        private async Task ProcessTasksAsync(CancellationToken cancellationToken)
+        public BatchProcessor(int batchSize, CancellationTokenSource cancellationTokenSource)
         {
-            while (!cancellationToken.IsCancellationRequested)
+            _queue = new BlockingCollection<T>(batchSize);
+            _cancellationTokenSource = cancellationTokenSource;
+        }
+
+        public void Start(Action<T> action) => Task.Run(() => ProcessItems(action, _cancellationTokenSource.Token));
+
+        public void BlockNewItems() => _queue.CompleteAdding();
+
+        public void AbortProcessing() => _cancellationTokenSource.Cancel();
+
+        public void Enqueue(T item)
+        {
+            if (CanHandleMoreItems)
             {
-                var batch = _taskQueue.GetConsumingEnumerable(cancellationToken);
-                await Task.WhenAll(batch);
+                try
+                {
+                    _queue.Add(item);
+                }
+                catch (InvalidOperationException)
+                {
+                    // Do nothing
+                }
+            }
+
+        }
+
+        private void ProcessItems(Action<T> action, CancellationToken cancellationToken)
+        {
+            while (!_cancellationTokenSource.IsCancellationRequested)
+            {
+                var batch = _queue.GetConsumingEnumerable(cancellationToken);
+
+                try
+                {
+                    foreach (var item in batch)
+                    {
+                        var task = Task.Run(() => action(item), cancellationToken);
+                        task.Wait();
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    Console.WriteLine("Stopping due to a cancel request");
+                    BlockNewItems();
+                }
+                catch (Exception)
+                {
+                    Console.WriteLine("Stopping due to an unhandled exception");
+                    BlockNewItems();
+                    AbortProcessing();
+                }
             }
         }
     }

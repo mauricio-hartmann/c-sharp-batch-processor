@@ -1,26 +1,55 @@
 ﻿using CSBE.Application;
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 
 public class Program
 {
     public static void Main(string[] args)
     {
-        var processor = new BatchProcessor(30);
-        processor.Start();
+        var cancellationTokenSource = new CancellationTokenSource();
 
-        for (int i = 0; i <= 50; i++)
+        Action<int> action = new Action<int>((item) =>
         {
-            var task = Task.Run(async () => await PrintAsync(i + 1));
-            processor.EnqueuTask(task);
+            Task.Delay(TimeSpan.FromSeconds(2)).Wait();
+            Console.WriteLine($"Printing value: {item}");
+
+            if (item > 3)
+                //cancellationTokenSource.Cancel();
+                throw new Exception();
+        });
+
+        var processor = new BatchProcessor<int>(1, cancellationTokenSource);
+
+        try
+        {
+            processor.Start(action);
+        }
+        catch (Exception)
+        {
+            processor.AbortProcessing();
         }
 
-        processor.Stop();
-    }
+        for (int i = 0; i <= 10; i++)
+        {
+            if (processor.CanHandleMoreItems)
+            {
+                var value = i + 1;
+                Console.WriteLine($"Adding value: {value}");
+                processor.Enqueue(value);
+            }
+            else
+            {
+                break;
+            }
+        }
 
-    public static async Task PrintAsync(int value)
-    {
-        await Task.Delay(2);
-        Console.WriteLine($"Task: {value}");
+        processor.BlockNewItems();
+
+        if (cancellationTokenSource.IsCancellationRequested is false)
+        {
+            // Wait avoiding main thread shut down while other threads are runnning
+            Thread.Sleep(TimeSpan.FromSeconds(10));
+        }
     }
 }
